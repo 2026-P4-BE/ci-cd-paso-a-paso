@@ -1,0 +1,62 @@
+# =============================================================================
+# PASO 1 de 6 - El workflow mínimo
+# -----------------------------------------------------------------------------
+# Qué agrega:    name, on, un job, runs-on, checkout, Java 17 y Maven: la base de todo workflow.
+# Concepto:      Pipeline = secuencia automatizada que dispara un evento (push / pull request).
+#                Etapas 1 (Checkout) y 2 (Build) del curso. Es el ejemplo del PDF con pocos cambios.
+# Qué se ve:     en la pestaña Actions aparece una ejecución "CI" con un job y 3 steps propios en verde.
+# Cómo usarlo:   copiarlo sobre .github/workflows/ci.yml de tienda-api (ver README).
+# =============================================================================
+
+# Nombre del workflow: es el texto que aparece en la pestaña Actions de GitHub.
+# (El PDF del curso lo llama "Java CI"; acá se llama CI para coincidir con el repo.)
+name: CI
+
+# Disparador (on): el evento que inicia el pipeline. Es lo que lo vuelve automático.
+on:
+  # Disparo manual: botón "Run workflow" en Actions o gh workflow run ci.yml --ref <rama>.
+  # Sirve para repetir una ejecución sin hacer un commit nuevo.
+  workflow_dispatch:
+  # Disparo normal de CI: cada push a una de estas ramas inicia el workflow.
+  push:
+    # Lista de ramas. Los patrones con ** incluyen ramas con barras (feature/login, feature/a/b).
+    # Van entre comillas para que se lean como texto literal.
+    branches: [main, develop, 'feature/**', 'release/**', 'hotfix/**']
+  # Cada pull request inicia el workflow: se prueba el cambio antes de integrarlo.
+  pull_request:
+    # En pull_request, branches filtra por la rama de DESTINO del PR (a dónde se quiere integrar).
+    branches: [main, develop]
+
+# Un workflow se compone de uno o más jobs. Cada job corre en su propia máquina.
+jobs:
+  # Identificador del job: otros jobs lo usan para referirse a este (needs).
+  build-test:
+    # Nombre legible que se muestra en la interfaz de GitHub.
+    name: Build
+    # Máquina virtual donde corre el job: GitHub la crea vacía para cada ejecución y la destruye
+    # al terminar (entorno limpio y reproducible, sin "en mi máquina funciona").
+    runs-on: ubuntu-latest
+    # Los steps son los pasos del job: se ejecutan en orden y, si uno falla, el resto se saltea (fail early).
+    steps:
+      # Etapa Checkout: trae el código del commit que disparó el workflow (trazabilidad, estado limpio del VCS).
+      - name: Checkout
+        # uses: ejecuta una acción reutilizable publicada en GitHub. @v7 es su versión mayor.
+        # (El PDF muestra @v4: cambia el número, no el concepto. Esta versión es la verificada en este repo.)
+        uses: actions/checkout@v7
+
+      # Deja el JDK que necesita el proyecto: el build no depende de lo que traiga la máquina.
+      - name: Set up Temurin 17
+        uses: actions/setup-java@v6
+        # with: parámetros de la acción.
+        with:
+          # Qué distribución de OpenJDK instalar (Eclipse Temurin, la build de Adoptium).
+          distribution: temurin
+          # Versión de Java. Entre comillas para que sea texto: sin ellas YAML lo lee como número.
+          java-version: '17'
+
+      # Etapa Build: Maven compila el proyecto en una máquina limpia.
+      - name: Compile with Maven
+        # run: ejecuta un comando de shell en la máquina del job (la alternativa a uses, que invoca una acción).
+        # ./mvnw es el Maven Wrapper del repo: descarga la versión exacta de Maven que el proyecto declara.
+        # -B (batch mode): salida sin colores ni barras de progreso, legible en el log de CI.
+        run: ./mvnw -B compile

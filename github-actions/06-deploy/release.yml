@@ -1,0 +1,286 @@
+# =============================================================================
+# PASO 6 de 6 - Deploy: staging automático, producción con aprobación humana
+# -----------------------------------------------------------------------------
+# Qué agrega:    jobs deploy-staging y deploy-production (environment: production) tras el release.
+# Concepto:      Etapa Deploy y entornos (environments). Continuous Delivery = el artefacto siempre
+#                está listo y una persona decide producción; Continuous Deployment = sin esa persona.
+# Qué se ve:     staging corre solo; production queda "Waiting" hasta que un revisor aprueba
+#                en la UI (Review deployments). Recién ahí se ejecuta.
+# Cómo usarlo:   copiarlo sobre .github/workflows/release.yml de tienda-api (ver README).
+# =============================================================================
+
+# Nombre del workflow: es el texto que aparece en la pestaña Actions de GitHub.
+name: Release
+
+# Disparador (on): el evento que inicia el pipeline.
+on:
+  # Disparo manual de respaldo: gh workflow run release.yml --ref v1.0.0 (el ref debe ser un tag que ya exista).
+  workflow_dispatch:
+  # Disparo normal: empujar un tag a GitHub.
+  push:
+    # Solo tags con forma de versión SemVer (v1.0.0, v2.3.1). En el patrón, * reemplaza cualquier texto sin barras.
+    # Crear el tag es la decisión humana de "esta versión se publica".
+    tags: ['v*.*.*']
+
+# Permisos por defecto de todo el workflow para el GITHUB_TOKEN (credencial temporal creada por GitHub en cada ejecución).
+# Mínimo privilegio: solo lectura.
+permissions:
+  # Solo lectura del contenido del repositorio.
+  contents: read
+
+# Un workflow se compone de uno o más jobs. Cada job corre en su propia máquina.
+jobs:
+  # Identificador del job: otros jobs lo usan para referirse a este (needs).
+  release:
+    # Nombre legible que se muestra en la interfaz de GitHub.
+    name: Verify, publish image and create GitHub Release
+    # Máquina virtual donde corre el job: GitHub la crea vacía para cada ejecución y la destruye
+    # al terminar (entorno limpio y reproducible, sin "en mi máquina funciona").
+    runs-on: ubuntu-latest
+    # Permisos de ESTE job. Reemplazan a los del workflow (no se suman): solo se agrega lo que el job necesita.
+    permissions:
+      # Escritura de contenido: permite crear el GitHub Release.
+      contents: write
+      # Escritura de paquetes: permite subir la imagen a GitHub Container Registry (GHCR).
+      packages: write
+    # ===== NUEVO EN ESTE PASO: outputs del job =====
+    # Outputs: valores que este job expone para que otros jobs los lean con needs.release.outputs.<nombre>.
+    outputs:
+      # Nombre de la imagen publicada, tomado del step "meta" (lo escribe en GITHUB_OUTPUT).
+      image: ${{ steps.meta.outputs.image }}
+      # Versión publicada, tomada del step "meta".
+      version: ${{ steps.meta.outputs.version }}
+    # ===== FIN DE LO NUEVO =====
+    # Los steps son los pasos del job: se ejecutan en orden y, si uno falla, el resto se saltea (fail early).
+    steps:
+      # Etapa Checkout: trae el código del commit al que apunta el tag (trazabilidad).
+      - name: Checkout
+        # uses: ejecuta una acción reutilizable publicada en GitHub. @v7 es su versión mayor.
+        uses: actions/checkout@v7
+
+      # Deja el JDK que necesita el proyecto: el build no depende de lo que traiga la máquina.
+      - name: Set up Temurin 17 with Maven cache
+        uses: actions/setup-java@v6
+        # with: parámetros de la acción.
+        with:
+          # Qué distribución de OpenJDK instalar (Eclipse Temurin, la build de Adoptium).
+          distribution: temurin
+          # Versión de Java. Entre comillas para que sea texto: sin ellas YAML lo lee como número.
+          java-version: '17'
+          # Guarda ~/.m2 entre ejecuciones (la clave depende del pom.xml): las dependencias no se descargan cada vez.
+          cache: maven
+
+      # Control de versión: el tag git y la versión del pom.xml tienen que decir lo mismo.
+      - name: Check that the Git tag matches the pom.xml version
+        # id: nombre interno del step, para leer sus outputs más abajo como steps.meta.outputs.*
+        id: meta
+        run: |
+          # GITHUB_REF_TYPE vale "tag" o "branch". Un release solo tiene sentido sobre un tag.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            # ::error::... es un comando de workflow: GitHub lo muestra como anotación roja con título y mensaje.
+            echo "::error title=Not a tag::Release must run on a tag (v1.2.3), not on '${GITHUB_REF_NAME}'. Use: gh workflow run release.yml --ref v1.2.3"
+            exit 1
+          fi
+          # GITHUB_REF_NAME vale "v1.0.0"; ${VAR#v} le quita la "v" inicial: queda 1.0.0.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # Le pide a Maven la versión del pom.xml: -q silencia el log, -DforceStdout imprime solo el valor, tail -n 1 se queda con la última línea.
+          POM_VERSION=$(./mvnw -q -B help:evaluate -Dexpression=project.version -DforceStdout | tail -n 1)
+          # Si tag y pom no coinciden, se corta antes de publicar nada: evita un release v1.0.1 que contenga un jar 1.0.0.
+          if [ "${TAG_VERSION}" != "${POM_VERSION}" ]; then
+            echo "::error title=Tag/version mismatch::Git tag is '${GITHUB_REF_NAME}' but pom.xml version is '${POM_VERSION}'. Update the pom.xml version (or tag the right commit) and try again."
+            exit 1
+          fi
+          # GHCR exige nombres de imagen en minúscula; el dueño del repo puede tener mayúsculas.
+          OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          # Escribir en el archivo GITHUB_OUTPUT define los outputs de este step.
+          echo "version=${POM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER}/tienda-api" >> "$GITHUB_OUTPUT"
+          echo "Tag ${GITHUB_REF_NAME} matches pom.xml version ${POM_VERSION}"
+
+      # Un release solo sale si todo lo anterior pasó: mismos quality gates que el CI (tests, JaCoCo, PMD).
+      - name: Verify (tests, coverage gate, PMD)
+        run: ./mvnw -B verify
+
+      # Etapa Packaging: construye la imagen con la versión como etiqueta.
+      - name: Build Docker image
+        # env: variables de entorno solo para este step.
+        # Pasar los valores por env (y no escribir ${{ }} dentro del script) es la práctica recomendada contra inyección de comandos.
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # --label: metadatos estándar OCI dentro de la imagen (repositorio de origen, versión y commit exacto): trazabilidad.
+          # -t repetido: la misma imagen queda con dos etiquetas, la versión fija (1.0.0) y latest (que se mueve en cada release).
+          docker build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" .
+
+      # Autentica el runner contra GHCR para poder publicar.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          # Registro de destino: GitHub Container Registry.
+          registry: ghcr.io
+          # Usuario: quien disparó el workflow.
+          username: ${{ github.actor }}
+          # Contraseña: el GITHUB_TOKEN que GitHub crea solo para esta ejecución y expira al terminar.
+          # No hay ninguna credencial guardada en el repositorio: "secrets" se lee en tiempo de ejecución.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publica la imagen en el registro de artefactos (etapa Release).
+      - name: Push image to GHCR
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # Sube las dos etiquetas. A partir de acá la imagen es el artefacto inmutable que se despliega.
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+
+      # Crea el GitHub Release asociado al tag y le adjunta el jar.
+      - name: Create GitHub Release with the jar attached
+        env:
+          # La CLI gh (preinstalada en el runner) toma el token de esta variable.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # --generate-notes: arma las notas con los commits y PR desde el release anterior.
+          # --verify-tag: aborta si el tag no existe en el remoto, en lugar de crearlo.
+          gh release create "${GITHUB_REF_NAME}" "target/tienda-api-${{ steps.meta.outputs.version }}.jar" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag
+
+
+  # ===== NUEVO EN ESTE PASO: deploy a staging (automático) =====
+  # Etapa Deploy, entorno de pre-producción. Se ejecuta solo cuando el release terminó bien.
+  deploy-staging:
+    name: Deploy to staging (simulated)
+    # needs: espera al job release y puede leer sus outputs.
+    needs: release
+    runs-on: ubuntu-latest
+    # environment: asocia el job a un entorno de GitHub (Settings > Environments).
+    # La ejecución queda registrada como deployment de "staging". En este repo staging no tiene reglas de protección, por eso corre sin esperar.
+    environment:
+      name: staging
+    # Permisos de este job: leer contenido y paquetes (solo descarga la imagen, no publica).
+    permissions:
+      contents: read
+      packages: read
+    # env a nivel job: disponible en todos sus steps. Toma los outputs del job release.
+    env:
+      IMAGE: ${{ needs.release.outputs.image }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      # Autenticación contra GHCR para poder descargar la imagen.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Se descarga la imagen ya publicada: no se recompila. Lo que se probó es lo que se despliega (artefacto inmutable).
+      - name: Pull the published image (the same immutable artifact, never rebuilt)
+        run: docker pull "${IMAGE}:${VERSION}"
+
+      # Simulación: no hay servidor real. El contenedor corre dentro del runner para demostrar que la imagen funciona.
+      - name: Simulated staging deploy - run the container inside the runner
+        run: |
+          echo "SIMULATION: a real deploy would update a staging server or cluster."
+          echo "Here the container just runs on this runner to prove the image works."
+          # Arranca la imagen publicada, en segundo plano, publicando el puerto 8080.
+          docker run -d --name tienda-staging -p 8080:8080 "${IMAGE}:${VERSION}"
+
+      # Smoke test: el entorno debe estar sano (UP) y responder con la versión que se quiso desplegar.
+      - name: Smoke test staging (health and version)
+        run: |
+          # Hasta 30 intentos con pausa de 2 s: la aplicación tarda en arrancar.
+          for _ in $(seq 1 30); do
+            # Primero /actuator/health debe decir UP.
+            if curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'; then
+              # Después /api/version debe devolver exactamente la versión del release.
+              curl -fsS http://localhost:8080/api/version | grep -q "\"version\":\"${VERSION}\""
+              echo "Staging smoke test passed: version ${VERSION} is UP"
+              exit 0
+            fi
+            sleep 2
+          done
+          # Nunca respondió bien: muestra el log del contenedor para diagnosticar y falla el step.
+          echo "Staging smoke test failed" >&2
+          docker logs tienda-staging
+          exit 1
+
+      # Limpieza del contenedor aunque el smoke test haya fallado.
+      - name: Remove container
+        if: always()
+        run: docker rm -f tienda-staging
+  # ===== FIN DE LO NUEVO =====
+
+  # ===== NUEVO EN ESTE PASO: deploy a producción (con aprobación humana) =====
+  # Etapa Deploy, producción. Idéntico a staging salvo el entorno: ahí está el freno humano.
+  deploy-production:
+    name: Deploy to production (simulated, manual approval)
+    # needs con lista: espera a release Y a deploy-staging. Si staging falla, producción no se ofrece.
+    needs: [release, deploy-staging]
+    runs-on: ubuntu-latest
+    # La aprobación manual NO está escrita en este archivo: viene de "Required reviewers" configurado
+    # en el entorno production (Settings > Environments). Al llegar acá el job queda en espera
+    # hasta que un revisor lo apruebe en la interfaz.
+    # Continuous Delivery (como está): una persona decide producción.
+    # Continuous Deployment: sacar los Required reviewers de ese entorno (el archivo no cambia)
+    # o borrar este bloque environment; entonces producción se despliega sola tras staging.
+    environment:
+      name: production
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.release.outputs.image }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      # Autenticación contra GHCR para poder descargar la imagen.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Se descarga la MISMA imagen que pasó por staging: no se recompila.
+      - name: Pull the published image (the same immutable artifact, never rebuilt)
+        run: docker pull "${IMAGE}:${VERSION}"
+
+      # Simulación: no hay servidor real. El contenedor corre dentro del runner.
+      - name: Simulated production deploy - run the container inside the runner
+        run: |
+          echo "SIMULATION: a real deploy would update the production server or cluster."
+          echo "Here the container just runs on this runner to prove the image works."
+          # Arranca la imagen publicada, en segundo plano, publicando el puerto 8080.
+          docker run -d --name tienda-production -p 8080:8080 "${IMAGE}:${VERSION}"
+
+      # Smoke test: salud y versión, igual que en staging.
+      - name: Smoke test production (health and version)
+        run: |
+          # Hasta 30 intentos con pausa de 2 s: la aplicación tarda en arrancar.
+          for _ in $(seq 1 30); do
+            # Primero /actuator/health debe decir UP.
+            if curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'; then
+              # Después /api/version debe devolver exactamente la versión del release.
+              curl -fsS http://localhost:8080/api/version | grep -q "\"version\":\"${VERSION}\""
+              echo "Production smoke test passed: version ${VERSION} is UP"
+              exit 0
+            fi
+            sleep 2
+          done
+          # Nunca respondió bien: muestra el log del contenedor para diagnosticar y falla el step.
+          echo "Production smoke test failed" >&2
+          docker logs tienda-production
+          exit 1
+
+      # Limpieza del contenedor aunque el smoke test haya fallado.
+      - name: Remove container
+        if: always()
+        run: docker rm -f tienda-production
+  # ===== FIN DE LO NUEVO =====

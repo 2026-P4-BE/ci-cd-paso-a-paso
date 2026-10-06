@@ -1,0 +1,79 @@
+# =============================================================================
+# PASO 2 de 6 - Tests y reportes
+# -----------------------------------------------------------------------------
+# Qué agrega:    reemplaza la compilación por mvn test y sube los reportes aunque el build falle.
+# Concepto:      Etapa Testing: fail early (falla rápido) y feedback inmediato al desarrollador.
+# Qué se ve:     si un test falla, el step queda en rojo y el job se corta; igual aparece
+#                el artefacto "reports-N-1" para descargar el detalle de qué test falló.
+# Cómo usarlo:   copiarlo sobre .github/workflows/ci.yml de tienda-api (ver README).
+# =============================================================================
+
+# Nombre del workflow: es el texto que aparece en la pestaña Actions de GitHub.
+# (El PDF del curso lo llama "Java CI"; acá se llama CI para coincidir con el repo.)
+name: CI
+
+# Disparador (on): el evento que inicia el pipeline. Es lo que lo vuelve automático.
+on:
+  # Disparo manual: botón "Run workflow" en Actions o gh workflow run ci.yml --ref <rama>.
+  # Sirve para repetir una ejecución sin hacer un commit nuevo.
+  workflow_dispatch:
+  # Disparo normal de CI: cada push a una de estas ramas inicia el workflow.
+  push:
+    # Lista de ramas. Los patrones con ** incluyen ramas con barras (feature/login, feature/a/b).
+    # Van entre comillas para que se lean como texto literal.
+    branches: [main, develop, 'feature/**', 'release/**', 'hotfix/**']
+  # Cada pull request inicia el workflow: se prueba el cambio antes de integrarlo.
+  pull_request:
+    # En pull_request, branches filtra por la rama de DESTINO del PR (a dónde se quiere integrar).
+    branches: [main, develop]
+
+# Un workflow se compone de uno o más jobs. Cada job corre en su propia máquina.
+jobs:
+  # Identificador del job: otros jobs lo usan para referirse a este (needs).
+  build-test:
+    # Nombre legible que se muestra en la interfaz de GitHub.
+    name: Build and test
+    # Máquina virtual donde corre el job: GitHub la crea vacía para cada ejecución y la destruye
+    # al terminar (entorno limpio y reproducible, sin "en mi máquina funciona").
+    runs-on: ubuntu-latest
+    # Los steps son los pasos del job: se ejecutan en orden y, si uno falla, el resto se saltea (fail early).
+    steps:
+      # Etapa Checkout: trae el código del commit que disparó el workflow (trazabilidad, estado limpio del VCS).
+      - name: Checkout
+        # uses: ejecuta una acción reutilizable publicada en GitHub. @v7 es su versión mayor.
+        # (El PDF muestra @v4: cambia el número, no el concepto. Esta versión es la verificada en este repo.)
+        uses: actions/checkout@v7
+
+      # Deja el JDK que necesita el proyecto: el build no depende de lo que traiga la máquina.
+      - name: Set up Temurin 17
+        uses: actions/setup-java@v6
+        # with: parámetros de la acción.
+        with:
+          # Qué distribución de OpenJDK instalar (Eclipse Temurin, la build de Adoptium).
+          distribution: temurin
+          # Versión de Java. Entre comillas para que sea texto: sin ellas YAML lo lee como número.
+          java-version: '17'
+
+      # ===== NUEVO EN ESTE PASO: ejecutar los tests y conservar los reportes =====
+      # Etapa Testing: mvn test compila y corre los tests unitarios y de integración (base H2).
+      # Un test rojo hace fallar el step y el job se corta acá (fail early). Reemplaza al step Compile.
+      - name: Run tests
+        run: ./mvnw -B test
+
+      # Publica los reportes como artefacto: quedan descargables desde la página de la ejecución.
+      - name: Upload test reports
+        # always(): el step corre aunque un step anterior haya fallado. Cuando los tests fallan es cuando más se necesitan los reportes.
+        if: always()
+        # Acción oficial para publicar archivos de la ejecución como artefacto.
+        uses: actions/upload-artifact@v7
+        with:
+          # Nombre del artefacto. Debe ser único dentro de la ejecución; run_attempt evita choques si se re-ejecuta un run fallido.
+          name: reports-${{ github.run_number }}-${{ github.run_attempt }}
+          # Archivos o carpetas a subir (relativos a la carpeta del repo en el runner).
+          path: |
+            target/surefire-reports/
+          # Si no hay archivos que subir, avisa con un warning en vez de fallar el step.
+          if-no-files-found: warn
+          # Días que GitHub conserva el artefacto antes de borrarlo.
+          retention-days: 14
+      # ===== FIN DE LO NUEVO =====

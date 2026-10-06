@@ -1,0 +1,24 @@
+# =============================================================================
+# SOLO LECTURA: resumen de turnos-api/jenkins/plugins.txt (el archivo real no se toca).
+# Los plugins son la parte de Jenkins que se extiende "a mano" en la mayoría de las instalaciones.
+# Acá se declaran por nombre:versión y se instalan al construir la imagen (ver el Dockerfile).
+# El archivo real tiene 77 líneas de plugins: estos 8 son los que se piden explícitamente;
+# el resto son sus dependencias, fijadas también para que nada cambie sin avisar.
+# =============================================================================
+
+# workflow-aggregator: el paquete "Pipeline". Sin él no existe pipeline { } ni el Jenkinsfile.
+workflow-aggregator:608.v67378e9d3db_1
+# git: permite que Jenkins clone el repositorio y consulte cambios (polling).
+git:5.10.1
+# configuration-as-code: lee casc.yaml y configura Jenkins al arrancar (JCasC).
+configuration-as-code:2132.v60435f73c18a_
+# job-dsl: permite crear el job desde código (la sección "jobs" de casc.yaml).
+job-dsl:3732.v9a_c49a_61a_313
+# pipeline-stage-view: dibuja las columnas de etapas (Stage View) con tiempos y colores.
+pipeline-stage-view:2.41
+# junit: step junit, que publica los resultados de los tests en Jenkins.
+junit:1432.v3f9a_b_73dd986
+# coverage: step recordCoverage, que publica la cobertura (JaCoCo) en Jenkins.
+coverage:2.3139.v731d2e83ea_8a_
+# timestamper: opción timestamps(), que antepone la hora a cada línea del log.
+timestamper:1.30

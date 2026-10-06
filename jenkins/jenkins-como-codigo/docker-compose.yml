@@ -1,0 +1,84 @@
+# =============================================================================
+# SOLO LECTURA: copia comentada de turnos-api/docker-compose.yml (el archivo real no se toca).
+# Docker Compose describe en un archivo los contenedores del laboratorio: el servidor Jenkins
+# y el registry de imágenes. Un solo comando (docker compose up) levanta todo igual en cualquier máquina.
+# =============================================================================
+
+# Nombre del proyecto Compose: prefijo de volúmenes y redes (por ejemplo turnos-ci_jenkins_home).
+name: turnos-ci
+
+# services: cada entrada es un contenedor.
+services:
+  # Servicio 1: el servidor Jenkins.
+  jenkins:
+    # Construye la imagen con el Dockerfile de la carpeta ./jenkins (el que se ve en esta carpeta).
+    build: ./jenkins
+    # Nombre y etiqueta con que queda la imagen construida.
+    image: turnos-jenkins:1.0
+    # Nombre fijo del contenedor.
+    container_name: turnos-jenkins
+    # SIMPLIFICACIÓN DE LA DEMO: corre como root para poder usar el socket de Docker del host.
+    # En un entorno real se usaría un agente dedicado o un proxy del socket.
+    user: root
+    # Publica puertos: puerto 8090 del host -> puerto 8080 del contenedor. Jenkins se abre en http://localhost:8090.
+    ports:
+      - "8090:8080"
+    # Variables de entorno del contenedor.
+    environment:
+      # JAVA_OPTS: opciones de la JVM de Jenkins. ">-" pliega las líneas en una sola:
+      # -Xmx512m limita la memoria; runSetupWizard=false salta el asistente de instalación (la configuración viene de casc.yaml);
+      # ALLOW_LOCAL_CHECKOUT=true permite que Jenkins use un repositorio git local (file://) como origen del pipeline.
+      JAVA_OPTS: >-
+        -Xmx512m
+        -Djenkins.install.runSetupWizard=false
+        -Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true
+      # Límite de memoria de Maven durante los builds.
+      MAVEN_OPTS: "-Xmx384m"
+    # volumes: datos que sobreviven si se recrea el contenedor, o carpetas compartidas con el host.
+    volumes:
+      # Volumen con nombre: todo el estado de Jenkins (historial de builds, configuración generada).
+      - jenkins_home:/var/jenkins_home
+      # Caché de Maven (el HOME es /root por "user: root"): las dependencias no se bajan en cada build.
+      - maven_cache:/root/.m2
+      # Socket del demonio Docker del host: así los comandos docker del pipeline construyen y ejecutan contenedores en el host.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # El repositorio de la carpeta actual, montado de solo lectura (:ro) donde casc.yaml espera encontrarlo.
+      - .:/repos/turnos-api:ro
+    # Red donde vive este contenedor (declarada al final).
+    networks:
+      - turnos-net
+    # Chequeo de salud: permite que "docker compose up --wait" (y scripts/doctor.sh) sepan cuándo Jenkins está listo de verdad.
+    healthcheck:
+      # Comando de prueba: pedir la página de login. Si responde, está sano.
+      test: ["CMD", "curl", "-fs", "--max-time", "3", "http://localhost:8080/login"]
+      # Cada cuánto se repite el chequeo.
+      interval: 5s
+      # Cuántos intentos fallidos se toleran antes de marcarlo "unhealthy" (arrancar Jenkins tarda).
+      retries: 60
+
+  # Servicio 2: registry privado de imágenes Docker (el destino de la etapa Publish).
+  registry:
+    # Imagen oficial del registry con versión fija.
+    image: registry:2.8.3
+    container_name: turnos-registry
+    # Puerto 5001 del host -> 5000 del contenedor: por eso la imagen se llama localhost:5001/turnos-api:...
+    ports:
+      - "5001:5000"
+    volumes:
+      # Las imágenes publicadas se guardan en un volumen y sobreviven a reinicios.
+      - registry_data:/var/lib/registry
+    networks:
+      - turnos-net
+
+# Declaración de los volúmenes con nombre usados arriba (Docker los crea y administra).
+volumes:
+  jenkins_home:
+  registry_data:
+  maven_cache:
+
+# Redes de Docker.
+networks:
+  # Nombre fijo: el pipeline conecta los contenedores de la aplicación a esta red,
+  # y así Jenkins llega a ellos por nombre (por ejemplo http://turnos-staging:8080).
+  turnos-net:
+    name: turnos-net

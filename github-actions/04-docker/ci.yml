@@ -1,0 +1,145 @@
+# =============================================================================
+# PASO 4 de 6 - Segundo job: imagen Docker
+# -----------------------------------------------------------------------------
+# Qué agrega:    job package con needs, que construye la imagen y la prueba (smoke test).
+# Concepto:      Jobs vs steps, dependencia entre jobs (needs) y etapa Packaging:
+#                "lo que se prueba es exactamente lo que se desplegará" (artefacto inmutable).
+# Qué se ve:     el grafo de la ejecución muestra dos cajas unidas por una flecha:
+#                build-test -> package. Si build-test falla, package no corre.
+# Cómo usarlo:   copiarlo sobre .github/workflows/ci.yml de tienda-api (ver README).
+# =============================================================================
+
+# Nombre del workflow: es el texto que aparece en la pestaña Actions de GitHub.
+# (El PDF del curso lo llama "Java CI"; acá se llama CI para coincidir con el repo.)
+name: CI
+
+# Disparador (on): el evento que inicia el pipeline. Es lo que lo vuelve automático.
+on:
+  # Disparo manual: botón "Run workflow" en Actions o gh workflow run ci.yml --ref <rama>.
+  # Sirve para repetir una ejecución sin hacer un commit nuevo.
+  workflow_dispatch:
+  # Disparo normal de CI: cada push a una de estas ramas inicia el workflow.
+  push:
+    # Lista de ramas. Los patrones con ** incluyen ramas con barras (feature/login, feature/a/b).
+    # Van entre comillas para que se lean como texto literal.
+    branches: [main, develop, 'feature/**', 'release/**', 'hotfix/**']
+  # Cada pull request inicia el workflow: se prueba el cambio antes de integrarlo.
+  pull_request:
+    # En pull_request, branches filtra por la rama de DESTINO del PR (a dónde se quiere integrar).
+    branches: [main, develop]
+
+# ===== NUEVO EN ESTE PASO: permisos mínimos del token =====
+# Permisos del GITHUB_TOKEN, la credencial temporal que GitHub crea para cada ejecución.
+# Mínimo privilegio: este workflow solo necesita leer el repositorio. Se profundiza en el paso 5.
+permissions:
+  # Solo lectura del contenido del repositorio (código, no escritura).
+  contents: read
+# ===== FIN DE LO NUEVO =====
+
+# Un workflow se compone de uno o más jobs. Cada job corre en su propia máquina.
+jobs:
+  # Identificador del job: otros jobs lo usan para referirse a este (needs).
+  build-test:
+    # Nombre legible que se muestra en la interfaz de GitHub.
+    name: Build, test and quality gates
+    # Máquina virtual donde corre el job: GitHub la crea vacía para cada ejecución y la destruye
+    # al terminar (entorno limpio y reproducible, sin "en mi máquina funciona").
+    runs-on: ubuntu-latest
+    # Los steps son los pasos del job: se ejecutan en orden y, si uno falla, el resto se saltea (fail early).
+    steps:
+      # Etapa Checkout: trae el código del commit que disparó el workflow (trazabilidad, estado limpio del VCS).
+      - name: Checkout
+        # uses: ejecuta una acción reutilizable publicada en GitHub. @v7 es su versión mayor.
+        # (El PDF muestra @v4: cambia el número, no el concepto. Esta versión es la verificada en este repo.)
+        uses: actions/checkout@v7
+
+      # Deja el JDK que necesita el proyecto: el build no depende de lo que traiga la máquina.
+      - name: Set up Temurin 17 with Maven cache
+        uses: actions/setup-java@v6
+        # with: parámetros de la acción.
+        with:
+          # Qué distribución de OpenJDK instalar (Eclipse Temurin, la build de Adoptium).
+          distribution: temurin
+          # Versión de Java. Entre comillas para que sea texto: sin ellas YAML lo lee como número.
+          java-version: '17'
+          # Guarda ~/.m2 entre ejecuciones (la clave depende del pom.xml): las dependencias no se descargan cada vez.
+          cache: maven
+
+      # verify = compile + tests + compuerta JaCoCo (cobertura de líneas >= 80%) + compuerta PMD.
+      # Las reglas viven en el pom.xml (ver pom-fragmento.xml). Cualquier falla corta el pipeline acá (fail early).
+      # Reemplaza al step Run tests.
+      - name: Verify (tests, coverage gate, PMD)
+        run: ./mvnw -B verify
+
+      # Publica los reportes como artefacto: quedan descargables desde la página de la ejecución.
+      - name: Upload test and quality reports
+        # always(): el step corre aunque un step anterior haya fallado. Cuando los tests fallan es cuando más se necesitan los reportes.
+        if: always()
+        # Acción oficial para publicar archivos de la ejecución como artefacto.
+        uses: actions/upload-artifact@v7
+        with:
+          # Nombre del artefacto. Debe ser único dentro de la ejecución; run_attempt evita choques si se re-ejecuta un run fallido.
+          name: reports-${{ github.run_number }}-${{ github.run_attempt }}
+          # Archivos o carpetas a subir, uno por línea (relativos a la carpeta del repo en el runner):
+          # reportes de tests (surefire), de cobertura (JaCoCo, HTML/XML/CSV) y de análisis estático (PMD, XML/HTML).
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+            target/pmd.xml
+            target/reports/pmd.html
+          # Si no hay archivos que subir, avisa con un warning en vez de fallar el step.
+          if-no-files-found: warn
+          # Días que GitHub conserva el artefacto antes de borrarlo.
+          retention-days: 14
+
+  # ===== NUEVO EN ESTE PASO: segundo job, con dependencia =====
+  # Segundo job: construye la imagen Docker y la prueba (etapa Packaging).
+  package:
+    name: Package and smoke-test Docker image
+    # needs: espera a que build-test termine BIEN. Si falla, este job ni arranca.
+    # Sin needs, los jobs de un workflow corren en paralelo.
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      # Cada job arranca en una máquina nueva y vacía: no hereda el código del job anterior, hay que bajarlo otra vez.
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Etapa Packaging: Dockerfile multi-stage (compila dentro de la imagen, ver Dockerfile de este paso).
+      - name: Build Docker image (tag = short SHA, nothing is pushed)
+        # run con | : bloque de varias líneas de shell. Los # de adentro son comentarios de shell.
+        run: |
+          # Primeros 7 caracteres del SHA del commit: la etiqueta de la imagen apunta al commit exacto (trazabilidad).
+          SHORT_SHA="${GITHUB_SHA::7}"
+          # Construye la imagen con el Dockerfile de la raíz del repo y la etiqueta con el SHA. No se publica en ningún lado.
+          docker build -t "tienda-api:${SHORT_SHA}" .
+          # GITHUB_ENV pasa la variable a los steps siguientes de este mismo job.
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      # Smoke test: prueba mínima de que lo empaquetado realmente arranca y responde.
+      - name: Run container and smoke-test /actuator/health
+        run: |
+          # Arranca el contenedor en segundo plano (-d), con nombre propio, publicando el puerto 8080.
+          docker run -d --name tienda-api -p 8080:8080 "tienda-api:${SHORT_SHA}"
+          # Hasta 30 intentos: Spring Boot tarda unos segundos en arrancar.
+          for i in $(seq 1 30); do
+            # Consulta el endpoint de salud de Actuator. curl -f falla ante error HTTP, -sS es silencioso pero muestra errores.
+            # grep -q busca "status":"UP" en la respuesta, sin imprimirla.
+            if curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'; then
+              echo "Health check passed after ${i} attempt(s)"
+              # exit 0: el step termina bien.
+              exit 0
+            fi
+            # Espera 2 segundos antes de reintentar.
+            sleep 2
+          done
+          # Nunca respondió UP: escribe el error en stderr, muestra el log del contenedor para diagnosticar y falla el step.
+          echo "Health check failed" >&2
+          docker logs tienda-api
+          exit 1
+
+      # Limpieza del contenedor aunque el smoke test haya fallado (en GitHub la máquina se destruye igual; es buena costumbre).
+      - name: Remove container
+        if: always()
+        run: docker rm -f tienda-api
+  # ===== FIN DE LO NUEVO =====

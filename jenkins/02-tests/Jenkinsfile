@@ -1,0 +1,92 @@
+// =============================================================================
+// PASO 2 de 5 - Tests, resultados y post
+// -----------------------------------------------------------------------------
+// Qué agrega:    etapa Test, publicación de resultados JUnit y bloque post (always / failure).
+// Concepto:      Etapa Testing: fail early y feedback inmediato. post = qué hacer según cómo terminó.
+// Qué se ve:     una 3ra columna Test; en el build aparece la pestaña Test Result con la tendencia.
+//                Si un test falla, la etapa queda roja, las siguientes no corren y se imprime la notificación simulada.
+// Cómo usarlo:  copiarlo sobre Jenkinsfile de turnos-api, commit en main y esperar el polling (ver README).
+// =============================================================================
+
+// Pipeline declarativo: todo el archivo vive dentro de un bloque pipeline { }.
+// Es el pipeline como código: se versiona junto con la aplicación.
+pipeline {
+    // agent: dónde corre el pipeline. any = cualquier agente (nodo) libre; acá, el propio Jenkins con 2 executors.
+    agent any
+
+    // options: configuración general del pipeline.
+    options {
+        // Antepone la hora a cada línea del log (plugin Timestamper): permite ver cuánto tarda cada etapa.
+        timestamps()
+        // Si el build pasa de 60 minutos se aborta: un build colgado no debe ocupar el servidor para siempre.
+        timeout(time: 60, unit: 'MINUTES')
+        // Un solo build a la vez de este job: los demás esperan en cola. Evita que dos despliegues se pisen.
+        disableConcurrentBuilds()
+        // Desactiva el checkout automático del inicio: la etapa Checkout lo hace de forma explícita y visible.
+        skipDefaultCheckout(true)
+        // Conserva los últimos 10 builds (logs y artefactos) y borra los más viejos para no llenar el disco.
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    // environment: variables de entorno disponibles en todas las etapas (dentro de sh se leen como $NOMBRE).
+    environment {
+        // Limita el heap de la JVM de Maven a 384 MB para no agotar la VM de Docker de la laptop.
+        MAVEN_OPTS = '-Xmx384m'
+    }
+
+    // stages: lista ordenada de etapas. Cada stage es una columna en Stage View.
+    // Si una etapa falla, las siguientes no corren (fail early).
+    stages {
+        // Etapa 1 del curso: Checkout.
+        stage('Checkout') {
+            // steps: las acciones concretas de la etapa.
+            steps {
+                // checkout scm: baja el mismo repositorio y commit que contiene este Jenkinsfile (trazabilidad).
+                // scm es la configuración de repositorio del job (la define casc.yaml).
+                checkout scm
+            }
+        }
+
+        // Etapa 2 del curso: Build. Maven arma el jar, el artefacto que se va a probar y empaquetar.
+        stage('Build') {
+            steps {
+                // sh ejecuta un comando de shell en el agente. clean borra compilaciones previas (entorno limpio); package arma el jar.
+                // -B: modo batch (log legible). -DskipTests: no corre los tests acá, tienen su propia etapa.
+                sh 'mvn -B clean package -DskipTests'
+            }
+        }
+        // ===== NUEVO EN ESTE PASO: etapa Test con publicación de resultados =====
+
+        // Etapa 3 del curso: Testing.
+        stage('Test') {
+            steps {
+                // Tests unitarios y de integración (base H2). Un test en rojo hace fallar la etapa y corta el pipeline (fail early).
+                sh 'mvn -B test'
+            }
+            // post a nivel de etapa: acciones al terminar esta etapa, según su resultado.
+            post {
+                // always: se ejecuta siempre, pase o falle la etapa.
+                // junit lee los reportes XML de Surefire y los publica en Jenkins (detalle de qué test falló y tendencia).
+                always { junit 'target/surefire-reports/*.xml' }
+            }
+        }
+        // ===== FIN DE LO NUEVO =====
+    }
+
+    // ===== NUEVO EN ESTE PASO: bloque post del pipeline =====
+    // post a nivel de pipeline: se evalúa al terminar TODAS las etapas, según el resultado final.
+    post {
+        // always: se ejecuta siempre, pase o falle el pipeline.
+        always {
+            // Guarda el jar como artefacto del build. fingerprint registra su huella MD5 para rastrear en qué builds se usó.
+            // allowEmptyArchive: no falla si no hay jar (por ejemplo, si el Build falló).
+            archiveArtifacts artifacts: 'target/*.jar', allowEmptyArchive: true, fingerprint: true
+        }
+        // failure: solo si el pipeline terminó en rojo.
+        failure {
+            // Notificación simulada: en la vida real acá iría Slack o e-mail.
+            echo "[SIMULATED NOTIFICATION] Build #${BUILD_NUMBER} FAILED - team notified (Slack/e-mail would go here)."
+        }
+    }
+    // ===== FIN DE LO NUEVO =====
+}

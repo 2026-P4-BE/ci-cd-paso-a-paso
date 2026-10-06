@@ -1,0 +1,71 @@
+# =============================================================================
+# SOLO LECTURA: copia comentada de turnos-api/jenkins/casc.yaml (el archivo real no se toca).
+# JCasC (Jenkins Configuration as Code): la configuración del servidor Jenkins escrita en YAML.
+# Jenkins la lee al arrancar: sin asistente de instalación ni clics. Mismo archivo, mismo Jenkins.
+# =============================================================================
+
+# Sección "jenkins": configuración del núcleo del servidor.
+jenkins:
+  # Mensaje que se muestra en la página principal de Jenkins.
+  systemMessage: "turnos-api CI/CD demo - Jenkins configured as code (jenkins/casc.yaml)"
+  # Cantidad de ejecutores propios: builds que pueden correr a la vez en este nodo.
+  numExecutors: 2
+  # SOLO PARA LA DEMO: credenciales descartables (admin / admin). No reutilizar fuera de una laptop de clase.
+  # (Esto es lo opuesto a la buena práctica "sin credenciales en el repositorio".)
+  # securityRealm: de dónde salen los usuarios. "local" = base propia de Jenkins.
+  securityRealm:
+    local:
+      # Cierra el registro: nadie puede crearse una cuenta.
+      allowsSignup: false
+      # Usuarios creados al arrancar.
+      users:
+        # Lista YAML: cada "-" es un usuario.
+        - id: "admin"
+          password: "admin"
+  # authorizationStrategy: qué puede hacer cada usuario.
+  authorizationStrategy:
+    # Todo usuario autenticado puede hacer todo (alcanza para una clase).
+    loggedInUsersCanDoAnything:
+      # Sin sesión iniciada no se puede ni leer.
+      allowAnonymousRead: false
+
+# Sección "unclassified": ajustes generales que no caen en otra categoría.
+unclassified:
+  location:
+    # URL pública de Jenkins (la usan los enlaces de las notificaciones y de la interfaz).
+    url: "http://localhost:8090/"
+
+# Semilla: crea el job del pipeline al arrancar, sin pasos manuales en la interfaz.
+# "jobs" usa el plugin Job DSL: cada "script" es un fragmento Groovy que define un job.
+# El script de abajo se deja SIN comentarios adentro a propósito: ">" es un bloque de texto YAML
+# plegado, donde los saltos de línea pueden convertirse en espacios; un comentario // podría tapar el resto del script.
+# Qué hace, de arriba hacia abajo:
+#   pipelineJob('turnos-api')        crea un job de tipo Pipeline con ese nombre.
+#   cpsScm                           el pipeline se carga desde un repositorio (Pipeline script from SCM):
+#                                    el Jenkinsfile viaja con el código.
+#   remote url('file:///repos/...')  repositorio de donde se lee el código: la carpeta montada por docker-compose.yml.
+#   branch('*/main')                 rama que Jenkins construye.
+#   scriptPath('Jenkinsfile')        ruta del Jenkinsfile dentro del repositorio.
+#   lightweight(false)               checkout completo del repositorio para leer el Jenkinsfile (no solo ese archivo).
+#   triggers scm('* * * * *')        polling del repositorio con sintaxis cron: cada minuto. Si hay un commit
+#                                    nuevo en main arranca un build: ese es el disparador de este pipeline.
+jobs:
+  - script: >
+      pipelineJob('turnos-api') {
+        description('CI/CD pipeline for turnos-api. Defined in the Jenkinsfile of the repository.')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('file:///repos/turnos-api') }
+                branch('*/main')
+              }
+            }
+            scriptPath('Jenkinsfile')
+            lightweight(false)
+          }
+        }
+        triggers {
+          scm('* * * * *')
+        }
+      }

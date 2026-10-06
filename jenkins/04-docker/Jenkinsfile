@@ -1,0 +1,155 @@
+// =============================================================================
+// PASO 4 de 5 - Imagen Docker y registry
+// -----------------------------------------------------------------------------
+// Qué agrega:    etapas Package (docker build con etiqueta trazable) y Publish (al registry local).
+// Concepto:      Etapas Packaging y Release: la imagen es el artefacto inmutable, etiquetada con versión, build y commit.
+// Qué se ve:     en el log, la imagen localhost:5001/turnos-api:<versión>-<build>-<commit>.
+//                Se puede comprobar en http://localhost:5001/v2/turnos-api/tags/list.
+// Cómo usarlo:  copiarlo sobre Jenkinsfile de turnos-api, commit en main y esperar el polling (ver README).
+// =============================================================================
+
+// Pipeline declarativo: todo el archivo vive dentro de un bloque pipeline { }.
+// Es el pipeline como código: se versiona junto con la aplicación.
+pipeline {
+    // agent: dónde corre el pipeline. any = cualquier agente (nodo) libre; acá, el propio Jenkins con 2 executors.
+    agent any
+
+    // options: configuración general del pipeline.
+    options {
+        // Antepone la hora a cada línea del log (plugin Timestamper): permite ver cuánto tarda cada etapa.
+        timestamps()
+        // Si el build pasa de 60 minutos se aborta: un build colgado no debe ocupar el servidor para siempre.
+        timeout(time: 60, unit: 'MINUTES')
+        // Un solo build a la vez de este job: los demás esperan en cola. Evita que dos despliegues se pisen.
+        disableConcurrentBuilds()
+        // Desactiva el checkout automático del inicio: la etapa Checkout lo hace de forma explícita y visible.
+        skipDefaultCheckout(true)
+        // Conserva los últimos 10 builds (logs y artefactos) y borra los más viejos para no llenar el disco.
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    // environment: variables de entorno disponibles en todas las etapas (dentro de sh se leen como $NOMBRE).
+    environment {
+        // Limita el heap de la JVM de Maven a 384 MB para no agotar la VM de Docker de la laptop.
+        MAVEN_OPTS = '-Xmx384m'
+        // ===== NUEVO EN ESTE PASO: datos para nombrar la imagen =====
+        // Registry de imágenes local (contenedor "registry" del docker-compose), publicado en el puerto 5001 del host.
+        REGISTRY   = 'localhost:5001'
+        // Nombre de la imagen de la aplicación.
+        IMAGE_NAME = 'turnos-api'
+        // ===== FIN DE LO NUEVO =====
+    }
+
+    // stages: lista ordenada de etapas. Cada stage es una columna en Stage View.
+    // Si una etapa falla, las siguientes no corren (fail early).
+    stages {
+        // Etapa 1 del curso: Checkout.
+        stage('Checkout') {
+            // steps: las acciones concretas de la etapa.
+            steps {
+                // checkout scm: baja el mismo repositorio y commit que contiene este Jenkinsfile (trazabilidad).
+                // scm es la configuración de repositorio del job (la define casc.yaml).
+                checkout scm
+                // ===== NUEVO EN ESTE PASO: etiqueta trazable para la imagen =====
+                // script: permite escribir Groovy libre dentro de un pipeline declarativo.
+                script {
+                    // Hash corto del commit. returnStdout devuelve la salida del comando como texto; trim() quita el salto de línea final.
+                    def sha = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+                    // Versión del pom.xml, pedida a Maven (-q silencia el log, -DforceStdout imprime solo el valor).
+                    def version = sh(returnStdout: true,
+                        script: 'mvn -q -B -DforceStdout help:evaluate -Dexpression=project.version').trim()
+                    // Etiqueta inmutable: <versión del pom>-<número de build>-<commit>. Cada imagen se rastrea hasta su build y su commit.
+                    // Se guarda en env.IMAGE para que la vean las etapas siguientes.
+                    env.IMAGE = "${REGISTRY}/${IMAGE_NAME}:${version}-${BUILD_NUMBER}-${sha}"
+                }
+                // Muestra en el log qué imagen se va a construir.
+                echo "Image to build: ${env.IMAGE}"
+                // ===== FIN DE LO NUEVO =====
+            }
+        }
+
+        // Etapa 2 del curso: Build. Maven arma el jar, el artefacto que se va a probar y empaquetar.
+        stage('Build') {
+            steps {
+                // sh ejecuta un comando de shell en el agente. clean borra compilaciones previas (entorno limpio); package arma el jar.
+                // -B: modo batch (log legible). -DskipTests: no corre los tests acá, tienen su propia etapa.
+                sh 'mvn -B clean package -DskipTests'
+            }
+        }
+
+        // Etapa 3 del curso: Testing.
+        stage('Test') {
+            steps {
+                // Tests unitarios y de integración (base H2). Un test en rojo hace fallar la etapa y corta el pipeline (fail early).
+                sh 'mvn -B test'
+            }
+            // post a nivel de etapa: acciones al terminar esta etapa, según su resultado.
+            post {
+                // always: se ejecuta siempre, pase o falle la etapa.
+                // junit lee los reportes XML de Surefire y los publica en Jenkins (detalle de qué test falló y tendencia).
+                always { junit 'target/surefire-reports/*.xml' }
+            }
+        }
+
+        // Parte de Testing: Coverage Gate. Quality gate: el build falla si la cobertura de líneas es menor a 80%.
+        stage('Coverage Gate') {
+            steps {
+                // Genera el reporte de JaCoCo y evalúa la regla del pom.xml. La regla es la execution "coverage-gate":
+                // plugin:goal@id ejecuta justamente esa execution. Se corre aparte de los tests para que sea una etapa visible.
+                sh 'mvn -B jacoco:report jacoco:check@coverage-gate'
+            }
+            post {
+                // recordCoverage (plugin Coverage) publica la cobertura en Jenkins: porcentajes y tendencia.
+                // parser JACOCO = formato del archivo; pattern = dónde está.
+                always { recordCoverage tools: [[parser: 'JACOCO', pattern: 'target/site/jacoco/jacoco.xml']] }
+            }
+        }
+
+        // Etapa 4 del curso: Static Analysis. Análisis estático (SAST): examina el código sin ejecutarlo.
+        stage('Static Analysis') {
+            steps {
+                // PMD revisa el código con las reglas de config/pmd-ruleset.xml. static-analysis es la execution del pom.xml.
+                // Si encuentra violaciones, el build falla.
+                sh 'mvn -B pmd:check@static-analysis'
+            }
+            post {
+                // Guarda el reporte XML de PMD como artefacto del build, aunque la etapa falle (allowEmptyArchive: no falla si no existe).
+                always { archiveArtifacts artifacts: 'target/pmd.xml', allowEmptyArchive: true }
+            }
+        }
+        // ===== NUEVO EN ESTE PASO: empaquetado y publicación de la imagen =====
+
+        // Etapa 5 del curso: Packaging. La aplicación se empaqueta como imagen Docker (artefacto inmutable).
+        stage('Package') {
+            steps {
+                // Construye la imagen con el Dockerfile de la raíz del repo (multi-stage) y la etiqueta con env.IMAGE.
+                // Comillas simples de Groovy: no interpola, así el shell expande "$IMAGE" (variable de entorno).
+                sh 'docker build -t "$IMAGE" .'
+            }
+        }
+
+        // Etapa 6 del curso: Release. Publish sube la imagen al registry; solo se llega acá si todas las etapas anteriores pasaron.
+        stage('Publish') {
+            steps {
+                // El daemon de Docker es el del host (socket montado), por eso localhost:5001 apunta al registry publicado en el host.
+                sh 'docker push "$IMAGE"'
+            }
+        }
+        // ===== FIN DE LO NUEVO =====
+    }
+
+    // post a nivel de pipeline: se evalúa al terminar TODAS las etapas, según el resultado final.
+    post {
+        // always: se ejecuta siempre, pase o falle el pipeline.
+        always {
+            // Guarda el jar como artefacto del build. fingerprint registra su huella MD5 para rastrear en qué builds se usó.
+            // allowEmptyArchive: no falla si no hay jar (por ejemplo, si el Build falló).
+            archiveArtifacts artifacts: 'target/*.jar', allowEmptyArchive: true, fingerprint: true
+        }
+        // failure: solo si el pipeline terminó en rojo.
+        failure {
+            // Notificación simulada: en la vida real acá iría Slack o e-mail.
+            echo "[SIMULATED NOTIFICATION] Build #${BUILD_NUMBER} FAILED - team notified (Slack/e-mail would go here)."
+        }
+    }
+}

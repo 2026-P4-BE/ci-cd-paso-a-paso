@@ -1,0 +1,8 @@
+# Linux runners and containers read these files: keep LF even when edited on Windows.
+*.yml        text eol=lf
+*.yaml       text eol=lf
+Jenkinsfile  text eol=lf
+Dockerfile   text eol=lf
+*.sh         text eol=lf
+*.xml        text eol=lf
+*.md         text eol=lf

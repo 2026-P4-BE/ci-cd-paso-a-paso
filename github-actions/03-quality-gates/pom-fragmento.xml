@@ -1,0 +1,103 @@
+<!--
+  ===========================================================================
+  EXTRACTO PARA LEER - NO ES UN ARCHIVO PARA COPIAR
+  ***************************************************************************
+  Son SOLO los bloques de JaCoCo y PMD del pom.xml real de tienda-api, que ya
+  los tiene. Sirven para mostrar dónde viven los quality gates: en el pom.xml,
+  no en el workflow. El workflow (ci.yml) solo ejecuta "mvn verify" y Maven
+  aplica estas reglas.
+
+  Dentro del pom.xml van en <project><build><plugins>.
+  Propiedades que usan (están en <properties> del pom.xml real):
+    jacoco.version = 0.8.13   |   pmd.plugin.version = 3.26.0   |   coverage.minimum = 0.80
+  ===========================================================================
+-->
+
+<!-- JaCoCo: mide qué porcentaje del código ejecutaron los tests (cobertura) -->
+<plugin>
+    <!-- Coordenadas Maven del plugin (grupo + nombre + versión), como cualquier dependencia -->
+    <groupId>org.jacoco</groupId>
+    <artifactId>jacoco-maven-plugin</artifactId>
+    <!-- Versión tomada de la propiedad jacoco.version: se cambia en un solo lugar -->
+    <version>${jacoco.version}</version>
+    <!-- Cada execution engancha un goal del plugin a una fase del ciclo de vida de Maven -->
+    <executions>
+        <execution>
+            <!-- Nombre de esta ejecución (para distinguirla de las otras) -->
+            <id>prepare-agent</id>
+            <goals>
+                <!-- Prepara el agente de JaCoCo: se adjunta a la JVM de los tests y registra qué líneas se ejecutan.
+                     Sin fase explícita usa su fase por defecto (initialize), o sea, antes de los tests -->
+                <goal>prepare-agent</goal>
+            </goals>
+        </execution>
+        <execution>
+            <id>report</id>
+            <!-- Fase verify: corre después de los tests y del empaquetado -->
+            <phase>verify</phase>
+            <goals>
+                <!-- Genera el reporte (HTML, XML y CSV) en target/site/jacoco. Es lo que se sube como artefacto -->
+                <goal>report</goal>
+            </goals>
+        </execution>
+        <execution>
+            <id>check</id>
+            <phase>verify</phase>
+            <goals>
+                <!-- check: evalúa las reglas de abajo y hace FALLAR el build si no se cumplen (el quality gate) -->
+                <goal>check</goal>
+            </goals>
+            <configuration>
+                <rules>
+                    <rule>
+                        <!-- BUNDLE: la regla se mide sobre el proyecto entero (no por clase ni por paquete) -->
+                        <element>BUNDLE</element>
+                        <limits>
+                            <limit>
+                                <!-- Qué se cuenta: líneas de código -->
+                                <counter>LINE</counter>
+                                <!-- Cómo se expresa: proporción de líneas cubiertas (0.80 = 80%) -->
+                                <value>COVEREDRATIO</value>
+                                <!-- Umbral mínimo: por debajo de esto el build falla. Viene de coverage.minimum = 0.80 -->
+                                <minimum>${coverage.minimum}</minimum>
+                            </limit>
+                        </limits>
+                    </rule>
+                </rules>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+
+<!-- PMD: análisis estático (SAST). Examina el código fuente SIN ejecutarlo y busca malas prácticas -->
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-pmd-plugin</artifactId>
+    <version>${pmd.plugin.version}</version>
+    <configuration>
+        <rulesets>
+            <!-- Archivo con las reglas que se aplican (config/pmd-ruleset.xml, dentro del repo) -->
+            <ruleset>${project.basedir}/config/pmd-ruleset.xml</ruleset>
+        </rulesets>
+        <!-- Imprime en la consola cada violación encontrada, para verla directo en el log del pipeline -->
+        <printFailingErrors>true</printFailingErrors>
+        <!-- No enlaza el reporte con el código fuente navegable (XRef): no hace falta en CI -->
+        <linkXRef>false</linkXRef>
+        <!-- Si hay violaciones, el build falla (bloquea el pipeline) -->
+        <failOnViolation>true</failOnViolation>
+        <!-- Prioridad desde la cual una violación hace fallar. PMD usa 1 (más grave) a 5 (más leve):
+             con 5 falla ante cualquier violación -->
+        <failurePriority>5</failurePriority>
+    </configuration>
+    <executions>
+        <execution>
+            <id>pmd-check</id>
+            <!-- Se engancha a verify, igual que JaCoCo: un solo "mvn verify" corre tests, cobertura y PMD -->
+            <phase>verify</phase>
+            <goals>
+                <!-- check: analiza el código y falla si corresponde. También genera target/pmd.xml -->
+                <goal>check</goal>
+            </goals>
+        </execution>
+    </executions>
+</plugin>
